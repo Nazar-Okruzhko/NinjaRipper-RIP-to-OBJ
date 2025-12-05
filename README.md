@@ -1,4 +1,4 @@
-# NinjaRipper's RIP to OBJ converter
+# NinjaRipper's RIP to OBJ converter (4th December Update!)
 
 <img width="1084" height="486" alt="Screenshot (3138)" src="https://github.com/user-attachments/assets/89f2c7e1-f374-4bf6-88f5-28c3f0cc3de7" />
 
