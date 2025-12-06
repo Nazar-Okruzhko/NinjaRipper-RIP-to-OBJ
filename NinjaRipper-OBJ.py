@@ -18,8 +18,18 @@ def read_int32(f):
 def read_float(f):
     return struct.unpack("<f", safe_read(f, 4, "float"))[0]
 
+def find_last_dds(f):
+    f.seek(0, 0)
+    data = f.read()
+    pattern = b'\x2E\x64\x64\x73\x00'
+    last_pos = data.rfind(pattern)
+    if last_pos == -1:
+        raise ValueError("Pattern '.dds\\x00' not found in file")
+    f.seek(last_pos + len(pattern), 0)
+    return f.tell()
+
 def convert_rip_to_obj(input_path):
-    print(f"\n=== Processing: {input_path} ===")
+    print(f"Processing: {input_path}\n")
     output_path = os.path.splitext(input_path)[0] + ".obj"
 
     vertices = []
@@ -33,52 +43,63 @@ def convert_rip_to_obj(input_path):
             def logpos(label=""):
                 print(f"[DEBUG] Pos=0x{f.tell():08X} {label}")
 
-            # HEADER
-            f.seek(8, 0)
+            # --- HEADER ---
+            f.seek(0, 0)
+            header_magic = safe_read(f, 5, "Header Magic")
+            print(f"Header Magic: {header_magic.hex().upper()}")  # Display 5 bytes
+
+            # Check if file is RIP
+            expected_magic = b'\xDE\xC0\xAD\xDE\x04'
+            if header_magic != expected_magic:
+                print("This file is not an actual RIP file. Skipping model extraction.")
+                return  # abort extraction, but still allow OBJ to be written if any?
+
+            # Skip next 3 bytes to face count
+            f.seek(3, 1)
             face_count = read_int16(f)
             f.seek(2, 1)
             vert_count = read_int16(f)
-            f.seek(621, 1)
 
+            # Scan for last '.dds\x00' before faces
+            face_start = find_last_dds(f)
+            print(f"Starting face extraction at 0x{face_start:08X}")
             print(f"Faces = {face_count}, Vertex blocks = {vert_count}")
 
-            # FACES
+            # --- FACES ---
             for _ in range(face_count):
                 i1 = read_int32(f)
                 i2 = read_int32(f)
                 i3 = read_int32(f)
-                faces.append((i1 + 1, i2 + 1, i3 + 1))  # OBJ is 1-indexed
+                faces.append((i1 + 1, i2 + 1, i3 + 1))  # OBJ 1-indexed
 
-
+            # --- VERTEX BLOCKS ---
+            block_skip = 116
+            normal_to_uv_skip = 36
 
             for i in range(vert_count):
                 vertex_offset = f.tell()
                 print(f"[VERTEX BLOCK ADDRESS] Vertex {i}: 0x{vertex_offset:08X}")
 
-                # Vertex
                 vx = read_float(f)
                 vy = read_float(f)
                 vz = read_float(f)
                 vertices.append((vx, vy, vz))
 
-                # Normal
                 normal_offset = f.tell()
                 print(f"[NORMAL BLOCK ADDRESS] Vertex {i}: 0x{normal_offset:08X}")
                 nx = read_float(f)
                 ny = read_float(f)
                 nz = read_float(f)
                 normals.append((nx, ny, nz))
-                f.seek(36, 1)
+                f.seek(normal_to_uv_skip, 1)
 
-                # UV
                 uv_offset = f.tell()
                 print(f"[UV BLOCK ADDRESS] Vertex {i}: 0x{uv_offset:08X}")
                 u = read_float(f)
                 v = read_float(f)
-                uvs.append((u, 1.0 - v))  # flip V for OBJ
+                uvs.append((u, 1.0 - v))
 
-                # Skip remaining bytes to next vertex block
-                f.seek(116, 1)
+                f.seek(block_skip, 1)
 
     except Exception as e:
         print("\n❌ WARNING — Converter crashed while reading:")
@@ -86,7 +107,7 @@ def convert_rip_to_obj(input_path):
         traceback.print_exc()
         print("\nAttempting to write out whatever was read so far...")
 
-    # WRITE OBJ file (even if crashed)
+    # --- WRITE OBJ ---
     try:
         with open(output_path, "w", encoding="utf-8") as out:
             out.write("# RIP → OBJ\n")
@@ -102,7 +123,7 @@ def convert_rip_to_obj(input_path):
     except Exception as e:
         print("\n❌ ERROR writing OBJ file:", e)
 
-# MAIN WRAPPER
+# --- MAIN WRAPPER ---
 if __name__ == "__main__":
     try:
         if len(sys.argv) <= 1:
