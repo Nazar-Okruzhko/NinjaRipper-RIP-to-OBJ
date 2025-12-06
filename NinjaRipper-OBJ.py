@@ -1,165 +1,127 @@
+import struct
 import sys
 import os
-import re
-from struct import unpack
+import traceback
 
-def read_uint(fh):
-    return unpack('I', fh.read(4))[0]
+def safe_read(f, size, desc=""):
+    data = f.read(size)
+    if len(data) != size:
+        raise EOFError(f"Unexpected end of file while reading {desc} ({len(data)}/{size} bytes)")
+    return data
 
-def read_string(fh):
-    str_bytes = b''
-    while True:
-        c = fh.read(1)
-        if c == b'\0' or not c:
-            return str_bytes.decode('cp437')
-        str_bytes += c
+def read_int16(f):
+    return struct.unpack("<h", safe_read(f, 2, "int16"))[0]
 
-class RipFileAttribute:
-    def __init__(self, fh):
-        self.semantic = read_string(fh)
-        self.semantic_index = read_uint(fh)
-        self.offset = read_uint(fh)
-        self.size = read_uint(fh)
-        self.end = self.offset + self.size
-        self.items = read_uint(fh)
-        format_codes = ['f', 'I', 'i']  # 0=float, 1=uint, 2=int
-        self.format = ''
-        for _ in range(self.items):
-            id_val = read_uint(fh)
-            self.format += format_codes[id_val] if id_val <= 2 else 'I'
-        self.data = []
+def read_int32(f):
+    return struct.unpack("<i", safe_read(f, 4, "int32"))[0]
 
-    def parse_vertex(self, buffer):
-        self.data.append(unpack(self.format, buffer[self.offset:self.end]))
+def read_float(f):
+    return struct.unpack("<f", safe_read(f, 4, "float"))[0]
 
-    def as_floats(self, arity=4, divisor=1.0):
-        if self.format.startswith('f' * min(arity, self.items)):
-            return [v[:arity] for v in self.data]
-        else:
-            return [tuple(float(v) / divisor for v in item[:arity]) for item in self.data]
+def convert_rip_to_obj(input_path):
+    print(f"\n=== Processing: {input_path} ===")
+    output_path = os.path.splitext(input_path)[0] + ".obj"
 
-class RipFile:
-    def __init__(self, filename):
-        self.filename = filename
-        self.faces = []
-        self.attributes = []
-        self.num_verts = 0
-        self.textures = []  # Stored but not used in .obj export
+    vertices = []
+    normals = []
+    uvs = []
+    faces = []
 
-    def parse_file(self):
-        with open(self.filename, "rb") as fh:
-            magic = read_uint(fh)
-            if magic != 0xDEADC0DE:
-                raise RuntimeError(f"Invalid file magic: {magic:08x}")
-            version = read_uint(fh)
-            if version != 4:
-                raise RuntimeError(f"Invalid file version: {version}")
-            num_faces = read_uint(fh)
-            self.num_verts = read_uint(fh)
-            block_size = read_uint(fh)
-            num_tex = read_uint(fh)
-            num_shaders = read_uint(fh)  # Ignored
-            num_attrs = read_uint(fh)
-
-            for _ in range(num_attrs):
-                self.attributes.append(RipFileAttribute(fh))
-
-            for _ in range(num_tex):
-                self.textures.append(read_string(fh))
-
-            for _ in range(num_shaders):
-                read_string(fh)  # Skip shaders
-
-            for _ in range(num_faces):
-                face = unpack('III', fh.read(12))
-                if face[0] != face[1] and face[1] != face[2] and face[0] != face[2]:
-                    self.faces.append(face)
-
-            for _ in range(self.num_verts):
-                data = fh.read(block_size)
-                if len(data) != block_size:
-                    raise RuntimeError("Incomplete vertex data read")
-                for attr in self.attributes:
-                    attr.parse_vertex(data)
-
-    def find_attrs(self, semantic):
-        return [attr for attr in self.attributes if attr.semantic == semantic]
-
-    def get_vertices(self):
-        pos_attrs = self.find_attrs('POSITION')
-        if not pos_attrs and self.attributes:
-            pos_attrs = [self.attributes[0]]  # Fallback to first attr if available
-        return pos_attrs[0].as_floats(3) if pos_attrs else []
-
-    def get_normals(self, divisor=255):
-        norm_attrs = self.find_attrs('NORMAL')
-        return norm_attrs[0].as_floats(3, divisor) if norm_attrs else None
-
-    def get_uvs(self, divisor=255):
-        uv_attrs = self.find_attrs('TEXCOORD')
-        if not uv_attrs:
-            return None
-        # Take first UV map only (ignore multi-maps for .obj)
-        first_uv_attr = uv_attrs[0]
-        uvs = [(u, 1.0 - v) for u, v in first_uv_attr.as_floats(4, divisor)]
-        return uvs
-
-def convert_rip_to_obj(rip_file_path):
     try:
-        print(f"Processing {rip_file_path}...")
-        rip = RipFile(rip_file_path)
-        rip.parse_file()
+        with open(input_path, "rb") as f:
 
-        vertices = rip.get_vertices()
-        normals = rip.get_normals()
-        uvs = rip.get_uvs()
-        faces = rip.faces
+            def logpos(label=""):
+                print(f"[DEBUG] Pos=0x{f.tell():08X} {label}")
 
-        if not vertices or not faces:
-            print(f"Skipping {rip_file_path}: No valid vertices or faces.")
-            return
+            # HEADER
+            f.seek(8, 0)
+            face_count = read_int16(f)
+            f.seek(2, 1)
+            vert_count = read_int16(f)
+            f.seek(621, 1)
 
-        obj_path = os.path.splitext(rip_file_path)[0] + '.obj'
-        with open(obj_path, 'w') as obj_file:
-            obj_file.write(f"# Converted from {os.path.basename(rip_file_path)} using standalone .rip to .obj converter\n")
+            print(f"Faces = {face_count}, Vertex blocks = {vert_count}")
 
-            # Vertices
-            for v in vertices:
-                obj_file.write(f"v {' '.join(f'{c:.6f}' for c in v)}\n")
+            # FACES
+            for _ in range(face_count):
+                i1 = read_int32(f)
+                i2 = read_int32(f)
+                i3 = read_int32(f)
+                faces.append((i1 + 1, i2 + 1, i3 + 1))  # OBJ is 1-indexed
 
-            # UVs (if available)
-            if uvs:
-                for uv in uvs:
-                    obj_file.write(f"vt {' '.join(f'{c:.6f}' for c in uv)}\n")
 
-            # Normals (if available)
-            if normals:
-                for n in normals:
-                    obj_file.write(f"vn {' '.join(f'{c:.6f}' for c in n)}\n")
 
-            # Faces (adjust for 1-based indexing; include vt/vn if present)
-            for f in faces:
-                face_str = ' '.join(str(idx + 1) for idx in f)
-                if uvs and normals:
-                    face_str = ' '.join(f"{idx+1}/{idx+1}/{idx+1}" for idx in f)
-                elif uvs:
-                    face_str = ' '.join(f"{idx+1}/{idx+1}" for idx in f)
-                elif normals:
-                    face_str = ' '.join(f"{idx+1}//{idx+1}" for idx in f)
-                obj_file.write(f"f {face_str}\n")
+            for i in range(vert_count):
+                vertex_offset = f.tell()
+                print(f"[VERTEX BLOCK ADDRESS] Vertex {i}: 0x{vertex_offset:08X}")
 
-        print(f"Converted {rip_file_path} to {obj_path}")
+                # Vertex
+                vx = read_float(f)
+                vy = read_float(f)
+                vz = read_float(f)
+                vertices.append((vx, vy, vz))
+
+                # Normal
+                normal_offset = f.tell()
+                print(f"[NORMAL BLOCK ADDRESS] Vertex {i}: 0x{normal_offset:08X}")
+                nx = read_float(f)
+                ny = read_float(f)
+                nz = read_float(f)
+                normals.append((nx, ny, nz))
+                f.seek(36, 1)
+
+                # UV
+                uv_offset = f.tell()
+                print(f"[UV BLOCK ADDRESS] Vertex {i}: 0x{uv_offset:08X}")
+                u = read_float(f)
+                v = read_float(f)
+                uvs.append((u, 1.0 - v))  # flip V for OBJ
+
+                # Skip remaining bytes to next vertex block
+                f.seek(116, 1)
+
     except Exception as e:
-        print(f"Error processing {rip_file_path}: {str(e)}")
-        import traceback
+        print("\n❌ WARNING — Converter crashed while reading:")
+        print(type(e).__name__, ":", e)
         traceback.print_exc()
+        print("\nAttempting to write out whatever was read so far...")
 
+    # WRITE OBJ file (even if crashed)
+    try:
+        with open(output_path, "w", encoding="utf-8") as out:
+            out.write("# RIP → OBJ\n")
+            for v in vertices:
+                out.write(f"v {v[0]} {v[1]} {v[2]}\n")
+            for vt in uvs:
+                out.write(f"vt {vt[0]} {vt[1]}\n")
+            for vn in normals:
+                out.write(f"vn {vn[0]} {vn[1]} {vn[2]}\n")
+            for a, b, c in faces:
+                out.write(f"f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}\n")
+        print(f"\n✓ Wrote OBJ: {output_path}\n")
+    except Exception as e:
+        print("\n❌ ERROR writing OBJ file:", e)
+
+# MAIN WRAPPER
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python script.py file1.rip [file2.rip ...]")
-    else:
+    try:
+        if len(sys.argv) <= 1:
+            print("Drag .RIP files onto this script.")
+            input("Press Enter to exit...")
+            sys.exit()
+
         for arg in sys.argv[1:]:
-            if arg.lower().endswith('.rip') and os.path.isfile(arg):
+            if os.path.isfile(arg):
                 convert_rip_to_obj(arg)
             else:
-                print(f"Skipping invalid file: {arg}")
+                print(f"Skipping: {arg} (not a file)")
+
+    except Exception as e:
+        print("\n❌ CRITICAL ERROR — Converter crashed safely:")
+        print(type(e).__name__, ":", e)
+        import traceback
+        traceback.print_exc()
+        input("\nPress Enter to exit...")
+
+    print("\nDone. Press Enter to exit.")
+    input()
