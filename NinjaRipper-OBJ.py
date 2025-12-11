@@ -3,14 +3,14 @@ import sys
 import os
 import traceback
 
-DEBUG_MODE = False
-FLIP_UV_VERTICALLY = True
+DEBUG_MODE = False  # Set False to disable block address printing
+FLIP_UV_VERTICALLY = True  # Set True to flip V coordinate (1.0 - v)
 
 # UV offset mapping: stride -> bytes to skip after vertex data to reach UV coords
 UV_OFFSET_MAP = {
     184: 60,
     56: 48,
-    160: 52
+    160: 52,
     #...
 }
 
@@ -26,6 +26,35 @@ def read_int32(f):
 def read_float(f):
     return struct.unpack("<f", safe_read(f, 4, "float"))[0]
 
+def find_dds_textures(f):
+    """Find first 3 DDS texture filenames in the file"""
+    f.seek(0, 0)
+    data = f.read()
+    pattern = b'.dds\x00'
+    
+    textures = []
+    search_pos = 0
+    
+    while len(textures) < 3:
+        pos = data.find(pattern, search_pos)
+        if pos == -1:
+            break
+        
+        # Walk backwards to find the start of the filename
+        start = pos
+        while start > 0 and data[start - 1] not in [0x00, 0xFF]:
+            start -= 1
+        
+        # Extract the texture filename
+        texture_name = data[start:pos + 4].decode('ascii', errors='ignore')
+        if texture_name and texture_name not in textures:
+            textures.append(texture_name)
+            print(f"Found texture #{len(textures)}: {texture_name}")
+        
+        search_pos = pos + len(pattern)
+    
+    return textures
+
 def find_last_dds(f):
     f.seek(0, 0)
     data = f.read()
@@ -36,14 +65,57 @@ def find_last_dds(f):
     f.seek(last_pos + len(pattern), 0)
     return f.tell()
 
+def write_mtl_file(mtl_path, obj_basename, textures):
+    """Write MTL file with embedded texture references"""
+    try:
+        with open(mtl_path, "w", encoding="utf-8") as mtl:
+            mtl.write("# Blender 3.6.23")
+            mtl.write("# www.blender.org\n\n")
+            mtl.write(f"newmtl {obj_basename}\n")
+            mtl.write("Ns 250.000000\n")
+            mtl.write("Ka 1.000000 1.000000 1.000000\n")
+            mtl.write("Ke 0.000000 0.000000 0.000000\n")
+            mtl.write("Ni 1.450000\n")
+            mtl.write("d 1.000000\n")
+            mtl.write("illum 2\n")
+            
+            # First DDS: Diffuse map
+            if len(textures) >= 1:
+                mtl.write(f"map_Kd {textures[0]}\n")
+            
+            # Third DDS: Specular map
+            if len(textures) >= 3:
+                mtl.write(f"map_Ks {textures[2]}\n")
+            
+            # Second DDS: Normal/Bump map
+            if len(textures) >= 2:
+                mtl.write(f"\nmap_Bump -bm 1.000000 {textures[1]}\n")
+        
+        print(f"✓ Wrote MTL: {mtl_path}")
+    except Exception as e:
+        print(f"❌ ERROR writing MTL file: {e}")
+
 def convert_rip_to_obj(input_path):
     print(f"Processing: {input_path}\n")
-    output_path = os.path.splitext(input_path)[0] + ".obj"
+    
+    base_name = os.path.splitext(os.path.basename(input_path))[0]
+    output_dir = os.path.dirname(input_path)
+    output_path = os.path.join(output_dir, base_name + ".obj")
+    mtl_path = os.path.join(output_dir, base_name + ".mtl")
 
     vertices, normals, uvs, faces = [], [], [], []
+    textures = []
 
     try:
         with open(input_path, "rb") as f:
+
+            # --- FIND TEXTURES ---
+            print("Searching for DDS textures...")
+            textures = find_dds_textures(f)
+            if textures:
+                print(f"Found {len(textures)} texture(s)\n")
+            else:
+                print("⚠ No textures found\n")
 
             # --- HEADER ---
             f.seek(0, 0)
@@ -135,10 +207,19 @@ def convert_rip_to_obj(input_path):
         traceback.print_exc()
         print("\nAttempting to write out whatever was read so far...")
 
+    # --- WRITE MTL FILE ---
+    if textures:
+        write_mtl_file(mtl_path, base_name, textures)
+
     # --- WRITE OBJ ---
     try:
         with open(output_path, "w", encoding="utf-8") as out:
             out.write("# RIP → OBJ\n")
+            
+            # Reference MTL file if textures were found
+            if textures:
+                out.write(f"mtllib {base_name}.mtl\n")
+            
             for v in vertices:
                 out.write(f"v {v[0]} {v[1]} {v[2]}\n")
             
@@ -149,6 +230,10 @@ def convert_rip_to_obj(input_path):
             for vn in normals:
                 out.write(f"vn {vn[0]} {vn[1]} {vn[2]}\n")
             
+            # Use material if textures were found
+            if textures:
+                out.write(f"usemtl {base_name}\n")
+            
             # Write faces with proper format
             for a, b, c in faces:
                 if uvs:
@@ -156,7 +241,7 @@ def convert_rip_to_obj(input_path):
                 else:
                     out.write(f"f {a}//{a} {b}//{b} {c}//{c}\n")  # v//vn format (no UVs)
         
-        print(f"\n✓ Wrote OBJ: {output_path}\n")
+        print(f"✓ Wrote OBJ: {output_path}\n")
     except Exception as e:
         print("\n❌ ERROR writing OBJ file:", e)
 
