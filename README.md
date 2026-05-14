@@ -15,3 +15,6 @@ The tool has option to either export the OBJ or GLB format.
 Remember to invert the Normals in Blender or in the image if model appears too dark, if the model has flipped UV Maps there is an option to un-flip them.
 
 Tested with NinjaRipper 1.7.1
+
+
+# 🚀 The NinjaRipper-RIP-to-OBJ Project got Rebooted! Now awailable in [Black 3D Viewer!](https://github.com/Nazar-Okruzhko/Black-3D-Viewer)
